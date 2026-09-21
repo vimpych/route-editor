@@ -128,6 +128,10 @@ async function flush() {
   }
   // Теги удобств меняет сервер (ответ «да» ставит тег): берём его версию.
   if (res.tags && !("tags" in pending)) draft.tags = res.tags;
+  // Точка сдвинулась — сервер вернул станции рядом и, может быть, поставил ближайшую.
+  if (res.nearMetro) data.nearMetro = res.nearMetro;
+  if (res.metro && !("metro" in pending)) draft.metro = res.metro;
+  if (res.nearMetro || "metro" in patch) renderMetro();
   setSave("Сохранено");
   return true;
 }
@@ -157,22 +161,201 @@ function render() {
     `<div class="card"><h2>Адрес и точка</h2>
       <label class="f">Адрес</label><input type="text" data-field="address" value="${esc(draft.address)}" maxlength="200" ${ro ? "disabled" : ""}>
       <label class="f">Район</label><input type="text" data-field="district" value="${esc(draft.district)}" maxlength="80" placeholder="как в каталоге: Даниловский" ${ro ? "disabled" : ""}>
-      <p class="hint">${draft.lat != null ? `Точка на карте: ${draft.lat.toFixed(5)}, ${draft.lng.toFixed(5)}` : "<b>Точки на карте нет</b> — без неё на проверку не отправить."}
-        ${draft.metro.length ? `<br>Метро: ${esc(draft.metro.join(", "))}` : ""}
-        <br>Точку и метро пока ставят в боте: блок «Адрес и точка».</p></div>`,
+      <label class="f">Точка на карте <span class="req">·&nbsp;обязательно</span></label>
+      <div id="map" class="mapbox"></div>
+      <div class="row maprow">
+        <span class="hint" id="point"></span>
+        ${ro ? "" : `<button class="chip" data-act="here">📍 Я здесь</button>`}
+      </div>
+      <label class="f">Метро</label>
+      <div id="metro"></div></div>`,
     `<div class="card"><h2>Чек и часы</h2>
       <label class="f">Средний чек</label><input type="text" data-field="avg_check" value="${esc(draft.avg_check)}" maxlength="60" placeholder="800 ₽ · 1000–2500 ₽ · 600 ₽/час · бесплатно" ${ro ? "disabled" : ""}>
       <label class="f">Часы работы</label><input type="text" data-field="opening_hours" value="${esc(draft.opening_hours)}" maxlength="200" placeholder="ежедневно 10:00–22:00" ${ro ? "disabled" : ""}></div>`,
     `<div class="card"><h2>Описание и фото</h2>
       <textarea data-field="summary" maxlength="400" placeholder="Одна-две строки для карточки" ${ro ? "disabled" : ""}>${esc(draft.summary)}</textarea>
-      <p class="hint">Фото: ${data.photos || "нет"}. Пока добавляются в боте: блок «Фото и описание».</p></div>`,
+      <label class="f">Фото · первое — обложка</label>
+      <div id="photos"></div>
+      <input type="file" id="file" accept="image/*" multiple hidden></div>`,
     `<div class="card"><h2>Заметка для модератора</h2>
       <textarea data-field="editor_note" maxlength="600" placeholder="Почему это место достойно Route. В каталог не уходит." ${ro ? "disabled" : ""}>${esc(draft.editor_note)}</textarea></div>`,
   ].join("");
   renderSections();
   renderTags();
   renderFacts();
+  renderPoint();
+  renderMetro();
+  renderPhotos();
   renderSend();
+  initMap();
+}
+
+/* ------------------------------------------------------------------ *
+ * Точка на карте и метро
+ *
+ * Leaflet с подложкой OpenStreetMap — без ключей и без связи с картой
+ * гостевого приложения. Точка ставится нажатием на карту, перетаскиванием
+ * метки или кнопкой «Я здесь». Ближайшую станцию сервер подставляет сам,
+ * если она ближе полутора километров; остальные — кнопками рядом.
+ * ------------------------------------------------------------------ */
+
+const MOSCOW = [55.7558, 37.6173];
+let map = null;
+let marker = null;
+
+function loadLeaflet() {
+  if (window.L) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const css = document.createElement("link");
+    css.rel = "stylesheet";
+    css.href = "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css";
+    document.head.appendChild(css);
+    const js = document.createElement("script");
+    js.src = "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js";
+    js.onload = resolve;
+    js.onerror = reject;
+    document.head.appendChild(js);
+  });
+}
+
+async function initMap() {
+  const el = document.getElementById("map");
+  try {
+    await loadLeaflet();
+  } catch {
+    el.textContent = "Карта не загрузилась. Проверьте связь — точку можно поставить кнопкой «Я здесь».";
+    return;
+  }
+  const has = draft.lat != null && draft.lng != null;
+  map = L.map(el, { zoomControl: true, attributionControl: true }).setView(has ? [draft.lat, draft.lng] : MOSCOW, has ? 17 : 11);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: "© OpenStreetMap",
+  }).addTo(map);
+  if (has) placeMarker(draft.lat, draft.lng, false);
+  if (data.editable) map.on("click", (e) => setPoint(e.latlng.lat, e.latlng.lng));
+}
+
+function placeMarker(lat, lng, pan = true) {
+  if (!map) return;
+  if (!marker) {
+    marker = L.marker([lat, lng], { draggable: data.editable }).addTo(map);
+    marker.on("dragend", () => {
+      const p = marker.getLatLng();
+      setPoint(p.lat, p.lng, false);
+    });
+  } else {
+    marker.setLatLng([lat, lng]);
+  }
+  if (pan) map.setView([lat, lng], Math.max(map.getZoom(), 17));
+}
+
+function setPoint(lat, lng, pan = true) {
+  draft.lat = Math.round(lat * 1e6) / 1e6;
+  draft.lng = Math.round(lng * 1e6) / 1e6;
+  placeMarker(draft.lat, draft.lng, pan);
+  change("lat", draft.lat);
+  change("lng", draft.lng);
+  renderPoint();
+  renderSend();   // снять «Не хватает: точка на карте», если она висела
+}
+
+function renderPoint() {
+  const el = document.getElementById("point");
+  if (!el) return;
+  el.innerHTML = draft.lat != null
+    ? `${draft.lat.toFixed(5)}, ${draft.lng.toFixed(5)}`
+    : `<b>Нажмите на карту</b>, где вход в заведение`;
+}
+
+/** Где я: сначала через Telegram, иначе — через браузер. */
+function locate() {
+  return new Promise((resolve, reject) => {
+    const viaBrowser = () => {
+      if (!navigator.geolocation) return reject(new Error("no_geo"));
+      navigator.geolocation.getCurrentPosition(
+        (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
+        reject,
+        { enableHighAccuracy: true, timeout: 15000 },
+      );
+    };
+    const lm = tg?.LocationManager;
+    if (!lm?.init) return viaBrowser();
+    lm.init(() => {
+      if (!lm.isLocationAvailable) return viaBrowser();
+      lm.getLocation((loc) => (loc ? resolve({ lat: loc.latitude, lng: loc.longitude }) : viaBrowser()));
+    });
+  });
+}
+
+function renderMetro() {
+  const el = document.getElementById("metro");
+  if (!el) return;
+  const ro = !data.editable;
+  const names = [...new Set([...draft.metro, ...(data.nearMetro ?? []).map((m) => m.name)])];
+  if (!names.length) {
+    el.innerHTML = `<p class="hint">Станции появятся, когда будет точка на карте.</p>`;
+    return;
+  }
+  el.innerHTML = `<div class="chips">${names.map((n) =>
+    `<button class="chip ${draft.metro.includes(n) ? "on" : ""}" data-metro="${esc(n)}" ${ro ? "disabled" : ""}>${draft.metro.includes(n) ? "✓ " : ""}${esc(n)}</button>`).join("")}</div>
+    <p class="hint">До трёх станций, ближайшие первыми.</p>`;
+}
+
+/* ------------------------------------------------------------------ *
+ * Фото
+ *
+ * Снимок сжимается прямо в телефоне до 1600 px по длинной стороне:
+ * оригинал с камеры весит 5–10 МБ, а карточке столько не нужно. Грузятся
+ * по одному, порядок меняется стрелкой, первое фото — обложка.
+ * ------------------------------------------------------------------ */
+
+const MAX_SIDE = 1600;
+let uploading = "";
+
+function renderPhotos() {
+  const el = document.getElementById("photos");
+  if (!el) return;
+  const ro = !data.editable;
+  const list = data.photos ?? [];
+  el.innerHTML = `<div class="photos">${list.map((p, i) => `
+      <div class="ph">
+        <img src="${esc(p.url)}" alt="" loading="lazy">
+        ${i === 0 ? `<span class="cover">обложка</span>` : ""}
+        ${ro ? "" : `<div class="phbtns">
+          ${i > 0 ? `<button data-phmove="${p.id}" aria-label="Сделать раньше">←</button>` : ""}
+          <button data-phdel="${p.id}" aria-label="Убрать">✕</button></div>`}
+      </div>`).join("")}
+      ${ro || list.length >= 10 ? "" : `<button class="phadd" data-act="addphoto">${uploading || "＋ Фото"}</button>`}
+    </div>
+    ${list.length ? "" : `<p class="hint">Без фото отправить можно, но с ними карточку одобрят быстрее.</p>`}`;
+}
+
+async function shrink(file) {
+  const bmp = await createImageBitmap(file);
+  const k = Math.min(1, MAX_SIDE / Math.max(bmp.width, bmp.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bmp.width * k);
+  canvas.height = Math.round(bmp.height * k);
+  canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.85);
+}
+
+async function uploadFiles(files) {
+  const list = [...files].slice(0, 10 - (data.photos?.length ?? 0));
+  for (let i = 0; i < list.length; i += 1) {
+    uploading = `Загружаю ${i + 1} из ${list.length}…`;
+    renderPhotos();
+    try {
+      const res = await api("photo-add", { draft_id: draftId, data: await shrink(list[i]) });
+      if (res.ok) data.photos = res.photos;
+      else setSave(res.message ?? "Фото не загрузилось", true);
+    } catch {
+      setSave("Фото не прочиталось — попробуйте другое", true);
+    }
+  }
+  uploading = "";
+  renderPhotos();
 }
 
 function renderSections() {
@@ -273,7 +456,35 @@ document.addEventListener("click", async (e) => {
   if (!t || t.disabled) return;
   tg?.HapticFeedback?.selectionChanged?.();
 
-  if (t.dataset.open) {
+  if (t.dataset.act === "here") {
+    t.disabled = true;
+    t.textContent = "Ищу…";
+    try {
+      const p = await locate();
+      setPoint(p.lat, p.lng);
+    } catch {
+      setSave("Не удалось узнать, где вы. Поставьте точку на карте пальцем.", true);
+    }
+    t.disabled = false;
+    t.textContent = "📍 Я здесь";
+  } else if (t.dataset.act === "addphoto") {
+    if (!uploading) document.getElementById("file").click();
+  } else if (t.dataset.metro) {
+    const name = t.dataset.metro;
+    if (!draft.metro.includes(name) && draft.metro.length >= 3) {
+      setSave("Больше трёх станций не нужно — снимите лишнюю", true);
+      return;
+    }
+    change("metro", draft.metro.includes(name) ? draft.metro.filter((m) => m !== name) : [...draft.metro, name]);
+    renderMetro();
+  } else if (t.dataset.phmove || t.dataset.phdel) {
+    const res = t.dataset.phmove
+      ? await api("photo-move", { draft_id: draftId, photo_id: t.dataset.phmove, dir: -1 })
+      : await api("photo-del", { draft_id: draftId, photo_id: t.dataset.phdel });
+    if (res.ok) data.photos = res.photos;
+    else setSave(res.message ?? "Не получилось", true);
+    renderPhotos();
+  } else if (t.dataset.open) {
     sectionsOpen = t.dataset.open === "sections";
     renderSections();
   } else if (t.dataset.sec) {
@@ -321,6 +532,11 @@ document.addEventListener("click", async (e) => {
     await flush();
     tg?.close?.();
   }
+});
+
+document.addEventListener("change", (e) => {
+  if (e.target?.id !== "file" || !e.target.files?.length) return;
+  uploadFiles(e.target.files).finally(() => { e.target.value = ""; });
 });
 
 // Уходя, досохраняем: закрыть форму на середине ввода — обычное дело.
