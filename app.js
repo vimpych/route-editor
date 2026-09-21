@@ -158,15 +158,14 @@ function render() {
     `<div class="card" id="sections"></div>`,
     `<div id="tags"></div>`,
     `<div class="card" id="facts"></div>`,
-    `<div class="card"><h2>Адрес и точка</h2>
+    `<div class="card"><h2>Адрес и координаты</h2>
       <label class="f">Адрес</label><input type="text" data-field="address" value="${esc(draft.address)}" maxlength="200" ${ro ? "disabled" : ""}>
       <label class="f">Район</label><input type="text" data-field="district" value="${esc(draft.district)}" maxlength="80" placeholder="как в каталоге: Даниловский" ${ro ? "disabled" : ""}>
-      <label class="f">Точка на карте <span class="req">·&nbsp;обязательно</span></label>
-      <div id="map" class="mapbox"></div>
-      <div class="row maprow">
-        <span class="hint" id="point"></span>
-        ${ro ? "" : `<button class="chip" data-act="here">📍 Я здесь</button>`}
-      </div>
+      <label class="f">Координаты <span class="req">·&nbsp;обязательно</span></label>
+      <input type="text" id="coords" autocomplete="off"
+        value="${draft.lat != null ? `${draft.lat}, ${draft.lng}` : ""}"
+        placeholder="55.7558, 37.6173 или ссылка на карту" ${ro ? "disabled" : ""}>
+      <p class="hint" id="point"></p>
       <label class="f">Метро</label>
       <div id="metro"></div></div>`,
     `<div class="card"><h2>Чек и часы</h2>
@@ -187,105 +186,53 @@ function render() {
   renderMetro();
   renderPhotos();
   renderSend();
-  initMap();
+
 }
 
 /* ------------------------------------------------------------------ *
- * Точка на карте и метро
+ * Координаты и метро
  *
- * Leaflet с подложкой OpenStreetMap — без ключей и без связи с картой
- * гостевого приложения. Точка ставится нажатием на карту, перетаскиванием
- * метки или кнопкой «Я здесь». Ближайшую станцию сервер подставляет сам,
- * если она ближе полутора километров; остальные — кнопками рядом.
+ * Точка — одним полем: «55.7558, 37.6173» или ссылка из Яндекс Карт,
+ * Google или 2ГИС. Разбирает сервер тем же кодом, что у бота, и отвечает,
+ * как понял. Отправляется отдельным запросом, а не вместе с остальными
+ * полями: опечатка в координатах не должна мешать сохранить чек и часы.
+ * Ближайшую станцию сервер подставляет сам, если она ближе полутора
+ * километров; остальные — кнопками.
  * ------------------------------------------------------------------ */
 
-const MOSCOW = [55.7558, 37.6173];
-let map = null;
-let marker = null;
+const COORDS_DELAY_MS = 800;
+let coordsTimer = null;
 
-function loadLeaflet() {
-  if (window.L) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    const css = document.createElement("link");
-    css.rel = "stylesheet";
-    css.href = "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css";
-    document.head.appendChild(css);
-    const js = document.createElement("script");
-    js.src = "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js";
-    js.onload = resolve;
-    js.onerror = reject;
-    document.head.appendChild(js);
-  });
-}
-
-async function initMap() {
-  const el = document.getElementById("map");
-  try {
-    await loadLeaflet();
-  } catch {
-    el.textContent = "Карта не загрузилась. Проверьте связь — точку можно поставить кнопкой «Я здесь».";
-    return;
-  }
-  const has = draft.lat != null && draft.lng != null;
-  map = L.map(el, { zoomControl: true, attributionControl: true }).setView(has ? [draft.lat, draft.lng] : MOSCOW, has ? 17 : 11);
-  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    attribution: "© OpenStreetMap",
-  }).addTo(map);
-  if (has) placeMarker(draft.lat, draft.lng, false);
-  if (data.editable) map.on("click", (e) => setPoint(e.latlng.lat, e.latlng.lng));
-}
-
-function placeMarker(lat, lng, pan = true) {
-  if (!map) return;
-  if (!marker) {
-    marker = L.marker([lat, lng], { draggable: data.editable }).addTo(map);
-    marker.on("dragend", () => {
-      const p = marker.getLatLng();
-      setPoint(p.lat, p.lng, false);
-    });
-  } else {
-    marker.setLatLng([lat, lng]);
-  }
-  if (pan) map.setView([lat, lng], Math.max(map.getZoom(), 17));
-}
-
-function setPoint(lat, lng, pan = true) {
-  draft.lat = Math.round(lat * 1e6) / 1e6;
-  draft.lng = Math.round(lng * 1e6) / 1e6;
-  placeMarker(draft.lat, draft.lng, pan);
-  change("lat", draft.lat);
-  change("lng", draft.lng);
-  renderPoint();
-  renderSend();   // снять «Не хватает: точка на карте», если она висела
-}
-
-function renderPoint() {
+function renderPoint(message, error = false) {
   const el = document.getElementById("point");
   if (!el) return;
+  el.classList.toggle("bad", error);
+  if (message) {
+    el.innerHTML = message;
+    return;
+  }
   el.innerHTML = draft.lat != null
-    ? `${draft.lat.toFixed(5)}, ${draft.lng.toFixed(5)}`
-    : `<b>Нажмите на карту</b>, где вход в заведение`;
+    ? `Точка: ${draft.lat.toFixed(5)}, ${draft.lng.toFixed(5)} · <a href="https://yandex.ru/maps/?pt=${draft.lng},${draft.lat}&z=17&l=map" target="_blank" rel="noopener">проверить на карте</a>`
+    : "Скопируйте координаты из карт: в Яндекс Картах — нажать на точку и скопировать числа под адресом.";
 }
 
-/** Где я: сначала через Telegram, иначе — через браузер. */
-function locate() {
-  return new Promise((resolve, reject) => {
-    const viaBrowser = () => {
-      if (!navigator.geolocation) return reject(new Error("no_geo"));
-      navigator.geolocation.getCurrentPosition(
-        (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
-        reject,
-        { enableHighAccuracy: true, timeout: 15000 },
-      );
-    };
-    const lm = tg?.LocationManager;
-    if (!lm?.init) return viaBrowser();
-    lm.init(() => {
-      if (!lm.isLocationAvailable) return viaBrowser();
-      lm.getLocation((loc) => (loc ? resolve({ lat: loc.latitude, lng: loc.longitude }) : viaBrowser()));
-    });
-  });
+async function saveCoords(text) {
+  if (!text.trim()) return;
+  setSave("Сохраняю…");
+  const res = await api("save", { draft_id: draftId, patch: { coords: text } });
+  if (!res.ok) {
+    setSave(res.reason === "bad_point" ? "Координаты не разобраны" : (REASONS[res.reason] ?? "Не сохранилось"), true);
+    renderPoint("Не разобрал. Нужно два числа через запятую — <b>55.7558, 37.6173</b> — или ссылка на место в картах.", true);
+    return;
+  }
+  draft.lat = res.lat;
+  draft.lng = res.lng;
+  if (res.nearMetro) data.nearMetro = res.nearMetro;
+  if (res.metro) draft.metro = res.metro;
+  setSave("Сохранено");
+  renderPoint();
+  renderMetro();
+  renderSend();   // снять «Не хватает: координаты», если она висела
 }
 
 function renderMetro() {
@@ -445,6 +392,12 @@ function renderSend(gaps) {
  * ------------------------------------------------------------------ */
 
 document.addEventListener("input", (e) => {
+  if (e.target?.id === "coords") {
+    clearTimeout(coordsTimer);
+    const text = e.target.value;
+    coordsTimer = setTimeout(() => saveCoords(text), COORDS_DELAY_MS);
+    return;
+  }
   const field = e.target?.dataset?.field;
   if (!field) return;
   change(field, e.target.value);
@@ -452,22 +405,19 @@ document.addEventListener("input", (e) => {
 });
 
 document.addEventListener("click", async (e) => {
+  // Внешние ссылки (проверить точку на карте) — через Telegram: так они
+  // открываются во встроенном браузере, а не пытаются заменить форму.
+  const link = e.target.closest("a[href^='http']");
+  if (link && tg?.openLink) {
+    e.preventDefault();
+    tg.openLink(link.href);
+    return;
+  }
   const t = e.target.closest("button");
   if (!t || t.disabled) return;
   tg?.HapticFeedback?.selectionChanged?.();
 
-  if (t.dataset.act === "here") {
-    t.disabled = true;
-    t.textContent = "Ищу…";
-    try {
-      const p = await locate();
-      setPoint(p.lat, p.lng);
-    } catch {
-      setSave("Не удалось узнать, где вы. Поставьте точку на карте пальцем.", true);
-    }
-    t.disabled = false;
-    t.textContent = "📍 Я здесь";
-  } else if (t.dataset.act === "addphoto") {
+  if (t.dataset.act === "addphoto") {
     if (!uploading) document.getElementById("file").click();
   } else if (t.dataset.metro) {
     const name = t.dataset.metro;

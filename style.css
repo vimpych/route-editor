@@ -58,10 +58,6 @@ label.f:first-of-type { margin-top: 0; }
 .send button:disabled { opacity: .5; }
 .send .gaps { max-width: 560px; margin: 0 auto 8px; font-size: 13px; color: var(--no); }
 input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
-.mapbox { height: 220px; border-radius: 10px; overflow: hidden; margin-top: 6px; background: var(--bg);
-  position: relative; z-index: 0; isolation: isolate; }  /* панели Leaflet (z-index 400+) не вылезают поверх шапки */
-.maprow { margin-top: 8px; }
-.maprow .chip { white-space: nowrap; }
 .photos { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 6px; }
 .ph { position: relative; aspect-ratio: 1; border-radius: 8px; overflow: hidden; background: var(--bg); }
 .ph img { width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -72,3 +68,5 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
   font-size: 14px; cursor: pointer; }
 .phadd { aspect-ratio: 1; border: 1px dashed var(--line); border-radius: 8px; background: transparent; color: var(--accent);
   font: inherit; font-size: 13px; cursor: pointer; padding: 4px; }
+.hint.bad { color: var(--no); }
+.hint a { color: var(--accent); }
